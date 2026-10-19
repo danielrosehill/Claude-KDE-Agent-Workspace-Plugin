@@ -133,6 +133,7 @@ function winInfo(w) {
           caption: w.caption, output: w.output ? w.output.name : null,
           desktops: w.desktops.map(function(d){return d.id;}), onAllDesktops: w.onAllDesktops,
           minimized: w.minimized, active: w.active,
+          transientFor: w.transientFor ? w.transientFor.internalId.toString() : null,
           geometry: {x: w.frameGeometry.x, y: w.frameGeometry.y,
                      width: w.frameGeometry.width, height: w.frameGeometry.height}};
 }
@@ -345,44 +346,170 @@ return winInfo(w);
     return run_kwin_script(js)
 
 
-def cmd_launch(a):
-    d = agent_desktop()
-    before = {w["handle"] for w in kwin_windows()}
+def active_window():
+    return run_kwin_script("return workspace.activeWindow ? workspace.activeWindow.internalId.toString() : null;")
+
+
+def activate_window(handle):
+    """Give a window keyboard focus. If it sits on another desktop, KWin switches the view there."""
+    return run_kwin_script(JS_WINDOW + f"""
+var w = findWin({json.dumps(handle)});
+if (!w) return {{__error: 'no window ' + {json.dumps(handle)}}};
+workspace.activeWindow = w;
+return winInfo(w);
+""")
+
+
+def _new_windows(before, proc, any_new, wm_class=None):
+    new = [w for w in kwin_windows() if w["handle"] not in before]
+    # A new dialog transient for a pre-existing window belongs to the user (e.g. their
+    # browser's Open File portal). Moving it drags its parent along, so never take one.
+    new = [w for w in new if w.get("transientFor") not in before]
+    if wm_class:
+        new = [w for w in new if w["resourceClass"] == wm_class]
+    tree = _descendants(proc.pid)
+    # Single-instance / D-Bus-activated apps (konsole, chrome, dolphin…) open their
+    # window from a process that is not our child — fall back to any new window.
+    return [w for w in new if w["pid"] in tree] or (new if any_new else [])
+
+
+def _spawn(argv):
     env = dict(os.environ)
     env["QT_LINUX_ACCESSIBILITY_ALWAYS_ON"] = "1"   # Qt apps skip AT-SPI registration without it
     env["QT_ACCESSIBILITY"] = "1"
     env.pop("NO_AT_BRIDGE", None)                    # GTK honours this to disable AT-SPI
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
     logs = CACHE_DIR / "logs"
-    logs.mkdir(exist_ok=True)
-    log = logs / f"{Path(a.argv[0]).name}-{time.strftime('%Y%m%d-%H%M%S')}.log"
-    fh = open(log, "wb")
-    proc = subprocess.Popen(a.argv, stdout=fh, stderr=subprocess.STDOUT, env=env, start_new_session=True)
+    logs.mkdir(parents=True, exist_ok=True)
+    log = logs / f"{Path(argv[0]).name}-{time.strftime('%Y%m%d-%H%M%S')}.log"
+    proc = subprocess.Popen(argv, stdout=open(log, "wb"), stderr=subprocess.STDOUT, env=env,
+                            start_new_session=True)
+    return proc, log
+
+
+def cmd_launch(a):
+    d = agent_desktop()
+    previous = active_window()
+    before = {w["handle"] for w in kwin_windows()}
+    proc, log = _spawn(a.argv)
     found, deadline = [], time.time() + a.timeout
     while time.time() < deadline:
         time.sleep(0.3)
-        new = [w for w in kwin_windows() if w["handle"] not in before]
-        tree = _descendants(proc.pid)
-        mine = [w for w in new if w["pid"] in tree]
-        # Single-instance / D-Bus-activated apps (konsole, chrome, dolphin…) open their
-        # window from a process that is not our child — fall back to any new window.
-        found = mine or (new if a.any_new_window else [])
+        found = _new_windows(before, proc, a.any_new_window)
         if found:
             time.sleep(a.settle)
-            new = [w for w in kwin_windows() if w["handle"] not in before]
-            found = [w for w in new if w["pid"] in _descendants(proc.pid)] or (new if a.any_new_window else found)
+            found = _new_windows(before, proc, a.any_new_window) or found
             break
         if proc.poll() is not None and not a.any_new_window:
             break
     moved = [move_window(w["handle"], desktop_id=d["id"], output=a.output) for w in found]
+    # A new window takes keyboard focus and keeps it after the move, so the user's typing
+    # would land in a window they cannot see. Hand focus back.
+    if moved and previous and not a.keep_focus:
+        activate_window(previous)
     out({
         "pid": proc.pid,
         "exited": proc.poll(),
         "log": str(log),
         "agent_desktop": d,
         "windows": moved,
+        "focus_returned_to": previous if moved and not a.keep_focus else None,
         "note": None if moved else "no new window matched — app may be single-instance (retry with --any-new-window), "
                                    "still starting (raise --timeout), CLI-only, or crashed (read the log)",
+    })
+
+
+def cmd_activate(a):
+    out(activate_window(a.handle))
+
+
+def cmd_close(a):
+    out(run_kwin_script(JS_WINDOW + f"""
+var w = findWin({json.dumps(a.handle)});
+if (!w) return {{__error: 'no window ' + {json.dumps(a.handle)}}};
+var info = winInfo(w);
+w.closeWindow();
+return info;
+"""))
+
+
+MD_BEGIN = "<!-- kde-agent-workspace:chrome:begin -->"
+MD_END = "<!-- kde-agent-workspace:chrome:end -->"
+
+
+def chrome_directive(desktop_name):
+    script = Path(__file__).resolve()
+    return f"""{MD_BEGIN}
+## Claude in Chrome — use the agent workspace
+
+When using Claude in Chrome (`mcp__claude-in-chrome__*`), work in a Chrome window on
+the agent's own KDE virtual desktop, **{desktop_name}**, not in the user's active
+workspace. Assume the main workspace (whatever desktop the user is on) is the user's
+private workspace: do not open, move, focus or screenshot windows there.
+
+Before the first browser call of a task, run the `use-chrome` skill (plugin
+`kde-agent-workspace`; from the catalogue: `skill:kde-agent-workspace/use-chrome`).
+It opens a Chrome window on {desktop_name} and creates the extension's tab group
+inside it. Script: `{script}`.
+
+Managed by `kagent.py claude-md`; edit the plugin, not this block.
+{MD_END}
+"""
+
+
+def cmd_claude_md(a):
+    """Write (or remove) the Claude-in-Chrome directive in a CLAUDE.md, idempotently."""
+    target = Path(a.file).expanduser()
+    text = target.read_text() if target.exists() else ""
+    if MD_BEGIN in text and MD_END in text:
+        head, _, rest = text.partition(MD_BEGIN)
+        _, _, tail = rest.partition(MD_END)
+        text = head + "\0" + tail
+    elif not a.remove:
+        # Never append inside or after another tool's generated block (e.g. a
+        # `<!-- habits-of-claude:begin -->` section rebuilt from source): go above it.
+        lines = text.splitlines(keepends=True)
+        at = next((i for i, l in enumerate(lines) if l.startswith("<!--") and l.rstrip().endswith(":begin -->")), None)
+        if at is None:
+            text = text.rstrip("\n") + ("\n\n" if text.strip() else "") + "\0\n"
+        else:
+            text = "".join(lines[:at]) + "\0\n\n" + "".join(lines[at:])
+    if a.remove:
+        new = text.replace("\0\n\n", "").replace("\0\n", "").replace("\0", "")
+    else:
+        name = (load_config().get("desktop_name") or DEFAULT_NAMES[0])
+        new = text.replace("\0", chrome_directive(name).rstrip("\n"))
+    changed = new != (target.read_text() if target.exists() else "")
+    if changed and not a.dry_run:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(new)
+    out({"file": str(target), "changed": changed, "dry_run": a.dry_run, "removed": a.remove,
+         "block": None if a.remove else chrome_directive(load_config().get("desktop_name") or DEFAULT_NAMES[0])})
+
+
+def cmd_browser_window(a):
+    """Open a fresh browser window on the agent desktop for Claude in Chrome.
+
+    The extension does not open a window of its own for a new tab group: it appends the
+    group to whichever Chrome window was focused last. A freshly opened window is focused,
+    so it keeps focus here (`previous_active` is returned) until the caller has created
+    the tab group and calls `activate <previous_active>`.
+    """
+    d = agent_desktop()
+    previous = active_window()
+    before = {w["handle"] for w in kwin_windows()}
+    proc, log = _spawn([a.browser, "--new-window", "about:blank"])
+    found, deadline = [], time.time() + a.timeout
+    while time.time() < deadline and not found:
+        time.sleep(0.3)
+        found = _new_windows(before, proc, True, wm_class=a.wm_class or Path(a.browser).name)
+    if not found:
+        raise KagentError(f"no new {a.browser} window appeared within {a.timeout}s (log: {log})")
+    win = move_window(found[0]["handle"], desktop_id=d["id"], output=a.output)
+    out({
+        "window": win,
+        "previous_active": previous,
+        "agent_desktop": d,
+        "next": "tabs_context_mcp {createIfEmpty: true} NOW, then: kagent.py activate <previous_active>",
     })
 
 
@@ -693,8 +820,30 @@ def main():
     c.add_argument("--settle", type=float, default=0.7, help="seconds to wait for extra windows after the first")
     c.add_argument("--any-new-window", action="store_true", help="accept windows from non-child processes")
     c.add_argument("--output", help="also send the window(s) to this output")
+    c.add_argument("--keep-focus", action="store_true", help="leave keyboard focus on the new window")
     c.add_argument("argv", nargs=argparse.REMAINDER, help="-- command [args...]")
     c.set_defaults(f=cmd_launch)
+
+    c = s.add_parser("activate", help="give a window keyboard focus (switches the view if it is on another desktop)")
+    c.add_argument("handle")
+    c.set_defaults(f=cmd_activate)
+
+    c = s.add_parser("browser-window", help="open a fresh browser window on the agent desktop for Claude in Chrome")
+    c.add_argument("--browser", default="google-chrome")
+    c.add_argument("--wm-class", help="KWin resourceClass of the browser; default: basename of --browser")
+    c.add_argument("--output", help="also send the window to this output")
+    c.add_argument("--timeout", type=float, default=10)
+    c.set_defaults(f=cmd_browser_window)
+
+    c = s.add_parser("close", help="close a window by handle")
+    c.add_argument("handle")
+    c.set_defaults(f=cmd_close)
+
+    c = s.add_parser("claude-md", help="write the Claude-in-Chrome agent-workspace directive into a CLAUDE.md")
+    c.add_argument("--file", default="~/.claude/CLAUDE.md", help="default: user-level ~/.claude/CLAUDE.md")
+    c.add_argument("--remove", action="store_true")
+    c.add_argument("--dry-run", action="store_true")
+    c.set_defaults(f=cmd_claude_md)
 
     c = s.add_parser("move", help="move a window by handle")
     c.add_argument("handle")

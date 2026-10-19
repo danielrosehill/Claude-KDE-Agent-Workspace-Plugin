@@ -90,3 +90,43 @@ exist as methods. Use `org.freedesktop.DBus.Properties.Get/Set`.
   `workspace.setCurrentDesktopForScreen(desktop, output)`, and
   `currentDesktopChanged(previous, current, output)`.
 - The D-Bus `current` property reports the desktop of the **active** output.
+
+## Focus follows a moved window (verified)
+
+- A window launched on the user's desktop is active, and stays active after
+  `w.desktops = [agentDesktop]` moves it. The view does not switch, so the user's
+  keystrokes go to a window they cannot see. Observed: a stray `a` in the agent Chrome
+  window's address bar. `launch` now records `workspace.activeWindow` first and restores
+  it afterwards.
+- Setting `workspace.activeWindow = w` for a window on another desktop **switches the
+  current desktop** to it. Activation cannot be used to focus an agent window silently.
+- `--any-new-window` once took a KDE portal "Open File" dialog
+  (`org.freedesktop.impl.portal.desktop.kde`) that the user had just opened from Chrome.
+  Moving it to the agent desktop moved its parent Chrome window too, because KWin keeps
+  transient groups together. New windows whose `transientFor` existed before the launch
+  are now never taken. `winInfo` exposes `transientFor`.
+- Windows on a hidden desktop ignore `frameGeometry` and maximize changes: the
+  geometry read back unchanged with `maximizeMode` still `3`.
+
+## Claude in Chrome (verified, Chrome 155.0.8059.79, extension as of 2026-10-19)
+
+- `tabs_context_mcp {createIfEmpty: true}` says it "creates a new Window". It does
+  not. KWin's `windowList()` and `stackingOrder` gained no window, and the
+  probe tab's title never appeared in any window caption. The group is added to the
+  **last-focused Chrome window** as a background tab. Closing the group's last tab left the
+  window count unchanged.
+- Proof of placement: launch `google-chrome --new-window about:blank` (it gets focus),
+  create the group, then peek-capture that window. The tab strip showed
+  `about:blank` + the "Claude" group. When focus had gone back to the user's Chrome
+  first, the group landed in the user's window and the agent window showed only
+  `about:blank`.
+- With the agent window on a hidden desktop and **not** focused: navigate, click, scroll,
+  `javascript_tool` and `computer screenshot` all worked, and screenshots were current.
+  `document.visibilityState` reported `visible` and `hasFocus()` `true`. The first
+  screenshot after group creation timed out once (`CDP sendCommand
+  "Page.captureScreenshot" timed out after 30000ms`). The retry succeeded.
+- Chrome on Wayland reports `outerWidth/outerHeight` equal to the viewport, which does
+  not identify the window. The tab strip has no AT-SPI exposure by default: the
+  `a11y-tree` of the Chrome pid showed only 6 frames. A peek capture is the working check.
+- All Chrome windows share one process (pid of `/opt/google/chrome/chrome`). Close the
+  agent window with KWin `w.closeWindow()` (`kagent.py close`), never `kill`.

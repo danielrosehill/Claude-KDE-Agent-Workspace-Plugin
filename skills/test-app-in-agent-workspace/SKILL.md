@@ -48,7 +48,9 @@ flash their screen.
 Returns `pid`, `log` (stdout+stderr of the app), and `windows[]` with each window's
 `handle`. The handle is KWin's internal UUID, used by `capture`/`move`. The window
 appears briefly on the user's desktop and is moved within a few hundred ms. The user's
-current desktop is not changed.
+current desktop is not changed. A new window takes keyboard focus and keeps it after the
+move, so `launch` hands focus back to the window the user had (`focus_returned_to`).
+Pass `--keep-focus` only when the app must stay focused.
 
 `launch` sets `QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1` and unsets `NO_AT_BRIDGE`. Without
 the first, Qt/KDE apps never register on the AT-SPI bus and cannot be driven.
@@ -57,7 +59,10 @@ If `windows` is empty, read the `note`:
 - Single-instance or D-Bus-activated apps (Dolphin, Chrome, an already-running Konsole
   without `--separate`) open their window from another process. Retry with `--any-new-window`.
   Ask the user to keep their hands off while it runs: any window they open in that span
-  gets taken too.
+  gets taken too. Dialogs transient for an already-open window are always skipped.
+  Moving one drags its parent along, and on 2026-10-19 that took the user's Chrome
+  window together with its Open File portal.
+- Browsers: use `browser-window` (see `use-chrome`), which matches on window class.
 - Slow start → `--timeout 40`.
 - `exited` non-null → it crashed or is CLI-only; read `log`.
 
