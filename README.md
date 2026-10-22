@@ -24,7 +24,7 @@ All of them call one script, `scripts/kagent.py`, which prints JSON:
 
 ```
 status | create | rename | remove | show | switch | windows | launch | move
-activate | close | browser-window | claude-md
+activate | close | browser-window | chrome-profiles | claude-md
 outputs | bind-output | setup-capture | remove-capture | capture
 a11y-tree | a11y-click | a11y-set-text | a11y-read
 ```
@@ -56,6 +56,13 @@ focus last, which is normally the user's. `use-chrome` opens a fresh Chrome wind
 the agent desktop, creates the group while that window still has focus, then returns
 focus to the user. All browser work then happens off-screen. Screenshots stay current
 there because the extension renders through CDP.
+
+Chrome profiles: `kagent.py chrome-profiles` lists them, with each one's account and
+whether Claude in Chrome is installed in it. `browser-window --profile <name|email|dir>`
+opens the agent window in that profile, so work on an account uses the profile that is
+already signed into it. The extension is per profile. Every profile that has it connects
+as a separate browser (its own `deviceId`), and the matching one must be selected with
+`select_browser` before the tab group is created.
 
 `kagent.py claude-md` writes a directive into a CLAUDE.md (default: user-level
 `~/.claude/CLAUDE.md`) telling every session to work this way and to treat the user's

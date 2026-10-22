@@ -1,6 +1,6 @@
 {
   "name": "kde-agent-workspace",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Give Claude its own KDE Plasma virtual desktop: list desktops, create a \"Claude\" or \"AI Agents\" desktop, launch and test GUI or terminal apps there without taking over the user's screen (AT-SPI input, KWin window capture), bind the agent desktop to its own display output, and run Claude in Chrome in a Chrome window on the agent desktop instead of the user's (with a CLAUDE.md directive making that the default). Plasma 6 on Wayland.",
   "author": {
     "name": "Daniel Rosehill",

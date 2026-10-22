@@ -28,6 +28,33 @@ KAGENT="${CLAUDE_PLUGIN_ROOT}/scripts/kagent.py"   # read from the catalogue? us
   renders through CDP, so Wayland's stale-frame problem (see
   `test-app-in-agent-workspace`) does not apply.
 
+## 0. Pick the Chrome profile
+
+The user keeps separate Chrome profiles per identity (e.g. Personal, Business). Each
+is signed into its own Google account and holds its own console sessions, so for
+work on a given account the right move is to drive **that profile**, not sign
+in again in another one. Signing in again is often blocked anyway: Workspace orgs
+ask for a passkey re-verification, which the agent cannot complete.
+
+```bash
+"$KAGENT" chrome-profiles      # dir, name, account email, claude_extension, last_used
+```
+
+- The account in the task (e.g. `daniel@dsrholdings.cloud`, "my work browser",
+  "the business profile") picks the profile. With no hint, use the last-used one.
+- **Claude in Chrome is per profile.** Every profile that has it shows up as its own
+  entry in `list_connected_browsers`, with its own `deviceId`. A profile with
+  `claude_extension: false` cannot be driven. Stop and ask the user to install the
+  extension in that profile and connect it there. Don't fall back to another
+  profile's window.
+- With more than one browser connected, the tab group goes to the **selected**
+  browser. Before step 1, `select_browser` the `deviceId` of the profile's extension.
+  Display names are whatever the user typed when connecting ("Browser 1" by default),
+  so ask them to name each one after its profile. If you can't tell which `deviceId`
+  belongs to which profile, ask with AskUserQuestion, or use `switch_browser` and let
+  them click Connect in the right one. Never guess.
+- Then pass `--profile '<name|email|dir>'` to `browser-window` in step 2.
+
 ## 1. Clear any existing group
 
 ```
@@ -41,8 +68,13 @@ and you keep working wherever the old group lives. Do not close tabs you did not
 ## 2. Open the agent window
 
 ```bash
-"$KAGENT" browser-window          # --browser chromium / --wm-class … for other Chromium builds
+"$KAGENT" browser-window --profile 'DSR Holdings'   # omit --profile for the last-used profile
+                                                   # --browser chromium / --wm-class … for other Chromium builds
 ```
+
+`--profile` refuses a profile without the extension. Without the flag, Chrome opens
+the window in its **last-used** profile, which may not be the one whose extension
+you selected.
 
 Returns `window.handle` (the agent's Chrome window, now on the agent desktop and focused)
 and `previous_active` (the user's window that had focus). The window flashes on the

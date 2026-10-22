@@ -451,6 +451,11 @@ Before the first browser call of a task, run the `use-chrome` skill (plugin
 It opens a Chrome window on {desktop_name} and creates the extension's tab group
 inside it. Script: `{script}`.
 
+Use the Chrome profile that matches the account the task is about (`kagent.py
+chrome-profiles` lists them; `browser-window --profile <name|email>`). It is already
+signed in, so don't sign in again in another profile. A profile without the Claude
+in Chrome extension can't be driven: ask the user to install it there.
+
 Managed by `kagent.py claude-md`; edit the plugin, not this block.
 {MD_END}
 """
@@ -486,6 +491,41 @@ def cmd_claude_md(a):
          "block": None if a.remove else chrome_directive(load_config().get("desktop_name") or DEFAULT_NAMES[0])})
 
 
+CLAUDE_EXTENSION_ID = "fcoeoabgfenejglbffodgkkbkcdhcgfn"   # Claude in Chrome (Web Store id)
+
+
+def chrome_profiles(user_data_dir):
+    """Profiles from Chrome's `Local State`, with whether Claude in Chrome is installed in each.
+
+    The extension is per profile: each profile that has it connects as a separate browser
+    (its own deviceId in list_connected_browsers), and a profile without it cannot be driven.
+    """
+    root = Path(user_data_dir).expanduser()
+    state = json.loads((root / "Local State").read_text())["profile"]
+    return [{
+        "dir": d,
+        "name": v.get("name"),
+        "email": v.get("user_name") or None,
+        "claude_extension": (root / d / "Extensions" / CLAUDE_EXTENSION_ID).is_dir(),
+        "last_used": d == state.get("last_used"),
+    } for d, v in state.get("info_cache", {}).items()]
+
+
+def resolve_chrome_profile(user_data_dir, wanted):
+    """Match a profile by directory, display name or account email (case-insensitive)."""
+    w = wanted.lower()
+    profiles = chrome_profiles(user_data_dir)
+    hits = [p for p in profiles if w in {p["dir"].lower(), (p["name"] or "").lower(), (p["email"] or "").lower()}]
+    if len(hits) != 1:
+        raise KagentError(f"profile {wanted!r} matched {len(hits)}; have "
+                          + ", ".join(f"{p['dir']} ({p['name']}, {p['email']})" for p in profiles))
+    return hits[0]
+
+
+def cmd_chrome_profiles(a):
+    out({"user_data_dir": a.user_data_dir, "profiles": chrome_profiles(a.user_data_dir)})
+
+
 def cmd_browser_window(a):
     """Open a fresh browser window on the agent desktop for Claude in Chrome.
 
@@ -493,11 +533,22 @@ def cmd_browser_window(a):
     group to whichever Chrome window was focused last. A freshly opened window is focused,
     so it keeps focus here (`previous_active` is returned) until the caller has created
     the tab group and calls `activate <previous_active>`.
+
+    Without --profile Chrome opens the window in its last-used profile. With it, the
+    window opens in that profile, which must have Claude in Chrome installed.
     """
+    argv = [a.browser, "--new-window", "about:blank"]
+    profile = None
+    if a.profile:
+        profile = resolve_chrome_profile(a.user_data_dir, a.profile)
+        if not profile["claude_extension"]:
+            raise KagentError(f"Chrome profile {profile['dir']} ({profile['name']}) has no Claude in Chrome "
+                              "extension; the user must install it and connect it in that profile first")
+        argv.insert(1, f"--profile-directory={profile['dir']}")
     d = agent_desktop()
     previous = active_window()
     before = {w["handle"] for w in kwin_windows()}
-    proc, log = _spawn([a.browser, "--new-window", "about:blank"])
+    proc, log = _spawn(argv)
     found, deadline = [], time.time() + a.timeout
     while time.time() < deadline and not found:
         time.sleep(0.3)
@@ -507,6 +558,7 @@ def cmd_browser_window(a):
     win = move_window(found[0]["handle"], desktop_id=d["id"], output=a.output)
     out({
         "window": win,
+        "profile": profile,
         "previous_active": previous,
         "agent_desktop": d,
         "next": "tabs_context_mcp {createIfEmpty: true} NOW, then: kagent.py activate <previous_active>",
@@ -833,7 +885,13 @@ def main():
     c.add_argument("--wm-class", help="KWin resourceClass of the browser; default: basename of --browser")
     c.add_argument("--output", help="also send the window to this output")
     c.add_argument("--timeout", type=float, default=10)
+    c.add_argument("--profile", help="Chrome profile: directory, display name or account email (see chrome-profiles)")
+    c.add_argument("--user-data-dir", default="~/.config/google-chrome")
     c.set_defaults(f=cmd_browser_window)
+
+    c = s.add_parser("chrome-profiles", help="list Chrome profiles and whether Claude in Chrome is installed in each")
+    c.add_argument("--user-data-dir", default="~/.config/google-chrome")
+    c.set_defaults(f=cmd_chrome_profiles)
 
     c = s.add_parser("close", help="close a window by handle")
     c.add_argument("handle")
