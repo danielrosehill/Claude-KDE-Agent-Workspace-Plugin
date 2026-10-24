@@ -439,24 +439,15 @@ MD_END = "<!-- kde-agent-workspace:chrome:end -->"
 def chrome_directive(desktop_name):
     script = Path(__file__).resolve()
     return f"""{MD_BEGIN}
-## Claude in Chrome — use the agent workspace
+## Claude in Chrome: use the agent workspace
 
-When using Claude in Chrome (`mcp__claude-in-chrome__*`), work in a Chrome window on
-the agent's own KDE virtual desktop, **{desktop_name}**, not in the user's active
-workspace. Assume the main workspace (whatever desktop the user is on) is the user's
-private workspace: do not open, move, focus or screenshot windows there.
-
-Before the first browser call of a task, run the `use-chrome` skill (plugin
-`kde-agent-workspace`; from the catalogue: `skill:kde-agent-workspace/use-chrome`).
-It opens a Chrome window on {desktop_name} and creates the extension's tab group
-inside it. Script: `{script}`.
-
-Use the Chrome profile that matches the account the task is about (`kagent.py
-chrome-profiles` lists them; `browser-window --profile <name|email>`). It is already
-signed in, so don't sign in again in another profile. A profile without the Claude
-in Chrome extension can't be driven: ask the user to install it there.
-
-Managed by `kagent.py claude-md`; edit the plugin, not this block.
+Drive Chrome (`mcp__claude-in-chrome__*`) only in a window on the KDE desktop
+**{desktop_name}**. The user's current desktop is private: never open, move, focus or
+screenshot windows there. Before the first browser call of a task, run skill
+`use-chrome` (`skill:kde-agent-workspace/use-chrome`, script `{script}`). Use the
+profile matching the task's account (`kagent.py chrome-profiles`; `browser-window
+--profile <name|email>`), which is already signed in. If a profile lacks the
+extension, ask the user to install it. Managed by `kagent.py claude-md`.
 {MD_END}
 """
 
