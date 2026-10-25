@@ -130,3 +130,26 @@ exist as methods. Use `org.freedesktop.DBus.Properties.Get/Set`.
   `a11y-tree` of the Chrome pid showed only 6 frames. A peek capture is the working check.
 - All Chrome windows share one process (pid of `/opt/google/chrome/chrome`). Close the
   agent window with KWin `w.closeWindow()` (`kagent.py close`), never `kill`.
+
+## Sandbox (headless KWin), verified 2026-10-25 on Plasma/KWin 6.6.6, Konsole 25.12.3
+
+- `kwin_wayland --virtual --socket <name> --width W --height H`, started with a private
+  `dbus-daemon --session --fork --print-address=1 --print-pid=1`, runs fully headless.
+  Output name is `Virtual-0`. `org.kde.KWin.ScreenShot2` on the private bus serves the
+  `setup-capture` helper (same `.desktop` authorisation), and `CaptureScreen Virtual-0`
+  returns current frames.
+- KWin script `print()` from the sandbox KWin goes to its stderr (`js: ...`), not the
+  user journal, so `run_kwin_script` reads the sandbox KWin log file instead.
+- **Use a private `XDG_RUNTIME_DIR`.** On the first try the sandbox shared the user's
+  runtime dir. D-Bus activation of `org.a11y.Bus` on the private bus started a second
+  `at-spi-bus-launcher`, and it **replaced the user's `/run/user/1000/at-spi/bus_0`
+  socket**. Apps on the real desktop that started after that would have joined the
+  sandbox's a11y bus. Fix: `systemctl --user restart at-spi-dbus-bus.service` recreated the
+  real socket. The sandbox now uses `$XDG_RUNTIME_DIR/kagent-sandbox-<name>/`, and the
+  user's socket mtime stayed unchanged through a full start/launch/stop cycle.
+- Clearing `os.environ` before building the sandbox env left `HOME` empty. Konsole then
+  showed a `kdialog` "Configuration file //.config/konsolerc not writable". Build the env
+  first, then swap it in.
+- `sandbox stop` finds the sandbox's processes by `XDG_RUNTIME_DIR=<private dir>` in
+  `/proc/<pid>/environ`. That catches apps started by tools run via `sandbox run`, not
+  only by `launch`.

@@ -14,6 +14,7 @@ import warnings
 import hashlib
 import json
 import os
+import shlex
 import shutil
 import struct
 import subprocess
@@ -46,6 +47,145 @@ class KagentError(Exception):
 
 def out(obj):
     print(json.dumps(obj, indent=2, ensure_ascii=False))
+
+
+# ---------------------------------------------------------------- sandbox
+#
+# A headless KWin (`kwin_wayland --virtual`) on a private D-Bus session bus and a private
+# XDG_RUNTIME_DIR. Nothing in it reaches the user's screen, focus, clipboard or session bus.
+# `kagent.py --sandbox <cmd>` points every other subcommand at it. The private runtime dir
+# matters: with the user's one, the sandbox's at-spi-bus-launcher replaces the user's
+# $XDG_RUNTIME_DIR/at-spi/bus_0 socket and breaks accessibility for apps started afterwards
+# (seen 2026-10-25; fixed by `systemctl --user restart at-spi-dbus-bus.service`).
+
+SANDBOX = None  # state dict while --sandbox is in force
+
+
+def _sandbox_state_file(name):
+    return CACHE_DIR / f"sandbox-{name}.json"
+
+
+def _alive(pid):
+    return pid and Path(f"/proc/{pid}").exists()
+
+
+def sandbox_state(name):
+    f = _sandbox_state_file(name)
+    if not f.exists():
+        return None
+    st = json.loads(f.read_text())
+    return st if _alive(st.get("kwin_pid")) else None
+
+
+def sandbox_env(st, base=None):
+    env = dict(base if base is not None else os.environ)
+    env.update({"DBUS_SESSION_BUS_ADDRESS": st["bus"], "XDG_RUNTIME_DIR": st["runtime_dir"],
+                "WAYLAND_DISPLAY": st["socket"], "QT_QPA_PLATFORM": "wayland",
+                "XDG_SESSION_TYPE": "wayland", "KAGENT_SANDBOX": st["name"]})
+    env.pop("DISPLAY", None)  # no Xwayland in the sandbox: X11-only apps fail rather than leak to the real screen
+    env.pop("AT_SPI_BUS_ADDRESS", None)
+    return env
+
+
+def enter_sandbox(name):
+    global SANDBOX
+    st = sandbox_state(name)
+    if not st:
+        raise KagentError(f"sandbox {name!r} is not running — `kagent.py sandbox start --name {name}`")
+    env = sandbox_env(st)
+    os.environ.clear()
+    os.environ.update(env)
+    SANDBOX = st
+
+
+def cmd_sandbox_start(a):
+    st = sandbox_state(a.name)
+    if st:
+        out(st | {"already_running": True})
+        return
+    real_runtime = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    runtime = Path(real_runtime) / f"kagent-sandbox-{a.name}"
+    runtime.mkdir(mode=0o700, exist_ok=True)
+    os.chmod(runtime, 0o700)
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    log = CACHE_DIR / f"sandbox-{a.name}-kwin.log"
+    base = {k: v for k, v in os.environ.items()
+            if k not in ("DBUS_SESSION_BUS_ADDRESS", "WAYLAND_DISPLAY", "DISPLAY", "AT_SPI_BUS_ADDRESS")}
+    base["XDG_RUNTIME_DIR"] = str(runtime)
+    r = subprocess.run(["dbus-daemon", "--session", "--fork", "--print-address=1", "--print-pid=1"],
+                       capture_output=True, text=True, env=base)
+    if r.returncode:
+        raise KagentError("dbus-daemon: " + r.stderr.strip())
+    bus, bus_pid = r.stdout.split()[:2]
+    env = dict(base, DBUS_SESSION_BUS_ADDRESS=bus)
+    kwin = subprocess.Popen(["kwin_wayland", "--virtual", "--socket", a.name,
+                             "--width", str(a.width), "--height", str(a.height)],
+                            stdin=subprocess.DEVNULL, stdout=open(log, "wb"), stderr=subprocess.STDOUT,
+                            env=env, start_new_session=True)
+    sock = runtime / a.name
+    for _ in range(100):
+        if sock.exists() or kwin.poll() is not None:
+            break
+        time.sleep(0.1)
+    if not sock.exists():
+        os.kill(int(bus_pid), 15)
+        raise KagentError(f"kwin_wayland did not open {sock}; see {log}")
+    st = {"name": a.name, "bus": bus, "bus_pid": int(bus_pid), "kwin_pid": kwin.pid,
+          "runtime_dir": str(runtime), "socket": a.name, "kwin_log": str(log),
+          "size": [a.width, a.height], "started": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
+    _sandbox_state_file(a.name).write_text(json.dumps(st, indent=1))
+    out(st)
+
+
+def cmd_sandbox_stop(a):
+    f = _sandbox_state_file(a.name)
+    if not f.exists():
+        out({"stopped": False, "note": "no such sandbox"})
+        return
+    st = json.loads(f.read_text())
+    # Everything started inside the sandbox carries its private runtime dir in its environment.
+    killed = []
+    for p in Path("/proc").iterdir():
+        if not p.name.isdigit() or int(p.name) in (os.getpid(),):
+            continue
+        try:
+            if f"XDG_RUNTIME_DIR={st['runtime_dir']}".encode() in (p / "environ").read_bytes().split(b"\0"):
+                os.kill(int(p.name), 15)
+                killed.append(int(p.name))
+        except (OSError, ValueError):
+            continue
+    for pid in (st.get("kwin_pid"), st.get("bus_pid")):
+        try:
+            os.kill(pid, 15)
+        except (OSError, TypeError):
+            pass
+    time.sleep(0.5)
+    shutil.rmtree(st["runtime_dir"], ignore_errors=True)
+    f.unlink(missing_ok=True)
+    out({"stopped": True, "name": a.name, "terminated_pids": killed})
+
+
+def cmd_sandbox_status(a):
+    st = sandbox_state(a.name)
+    out(st | {"running": True} if st else {"name": a.name, "running": False})
+
+
+def cmd_sandbox_env(a):
+    st = sandbox_state(a.name)
+    if not st:
+        raise KagentError(f"sandbox {a.name!r} is not running")
+    env = sandbox_env(st, base={})
+    print("unset DISPLAY AT_SPI_BUS_ADDRESS")
+    for k, v in env.items():
+        print(f"export {k}={shlex.quote(v)}")
+
+
+def cmd_sandbox_run(a):
+    """Run a command inside the sandbox in the foreground (qdbus probes, CLIs); exit code passes through."""
+    st = sandbox_state(a.name)
+    if not st:
+        raise KagentError(f"sandbox {a.name!r} is not running")
+    sys.exit(subprocess.run(a.argv, env=sandbox_env(st)).returncode)
 
 
 # ---------------------------------------------------------------- D-Bus / KWin
@@ -96,6 +236,7 @@ def run_kwin_script(body, timeout=3.0):
     path = CACHE_DIR / f"script-{nonce}.js"
     path.write_text(src)
     since = f"@{int(time.time()) - 1}"
+    log_offset = Path(SANDBOX["kwin_log"]).stat().st_size if SANDBOX else 0
     bus = _bus()
     scripting = bus.get_object(KWIN, "/Scripting")
     plugin = f"kagent-{nonce}"
@@ -109,8 +250,13 @@ def run_kwin_script(body, timeout=3.0):
         deadline = time.time() + timeout
         while time.time() < deadline:
             time.sleep(0.15)
-            log = subprocess.run(["journalctl", "--user", "--since", since, "-o", "cat", "--no-pager"],
-                                 capture_output=True, text=True).stdout
+            if SANDBOX:  # the sandbox KWin logs to its own file, not the journal
+                with open(SANDBOX["kwin_log"], "rb") as fh:
+                    fh.seek(log_offset)
+                    log = fh.read().decode("utf-8", "replace")
+            else:
+                log = subprocess.run(["journalctl", "--user", "--since", since, "-o", "cat", "--no-pager"],
+                                     capture_output=True, text=True).stdout
             for line in log.splitlines():
                 idx = line.find(marker + " ")
                 if idx >= 0:
@@ -308,7 +454,7 @@ def cmd_switch(a):
 
 def cmd_windows(a):
     wins = kwin_windows()
-    if not a.all:
+    if not a.all and not SANDBOX:
         d = agent_desktop()
         wins = [w for w in wins if d["id"] in w["desktops"] and not w["onAllDesktops"]]
     out(wins)
@@ -387,6 +533,8 @@ def _spawn(argv):
 
 
 def cmd_launch(a):
+    if SANDBOX:
+        return _launch_in_sandbox(a)
     d = agent_desktop()
     previous = active_window()
     before = {w["handle"] for w in kwin_windows()}
@@ -416,6 +564,24 @@ def cmd_launch(a):
         "note": None if moved else "no new window matched — app may be single-instance (retry with --any-new-window), "
                                    "still starting (raise --timeout), CLI-only, or crashed (read the log)",
     })
+
+
+def _launch_in_sandbox(a):
+    """Inside the sandbox there is one desktop and no user focus to protect: start and wait for windows."""
+    before = {w["handle"] for w in kwin_windows()}
+    proc, log = _spawn(a.argv)
+    found, deadline = [], time.time() + a.timeout
+    while time.time() < deadline:
+        time.sleep(0.3)
+        found = _new_windows(before, proc, a.any_new_window)
+        if found:
+            time.sleep(a.settle)
+            found = _new_windows(before, proc, a.any_new_window) or found
+            break
+        if proc.poll() is not None and not a.any_new_window:
+            break
+    out({"sandbox": SANDBOX["name"], "pid": proc.pid, "exited": proc.poll(), "log": str(log), "windows": found,
+         "note": None if found else "no new window matched — retry with --any-new-window, raise --timeout, or read the log"})
 
 
 def cmd_activate(a):
@@ -696,6 +862,8 @@ def cmd_capture(a):
     outfile = a.output or str(CACHE_DIR / f"capture-{time.strftime('%Y%m%d-%H%M%S')}.png")
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     prev = None
+    if a.peek and SANDBOX:
+        raise KagentError("--peek is for hidden desktops; sandbox windows always repaint")
     if a.peek:
         # Hidden-desktop windows get no Wayland frame callbacks, so they stop repainting and
         # CaptureWindow returns the last frame committed while visible. A brief switch refreshes it.
@@ -835,7 +1003,18 @@ def cmd_a11y_read(a):
 
 def main():
     p = argparse.ArgumentParser(prog="kagent.py", description=__doc__.splitlines()[0])
+    p.add_argument("--sandbox", action="store_true", help="run the subcommand inside the headless sandbox KWin")
+    p.add_argument("--sandbox-name", default="agent-sandbox", help="which sandbox (default: agent-sandbox)")
     s = p.add_subparsers(dest="cmd", required=True)
+
+    c = s.add_parser("sandbox", help="headless KWin on a private bus: start | stop | status | env | run -- cmd")
+    c.add_argument("action", choices=["start", "stop", "status", "env", "run"])
+    c.add_argument("--name", default="agent-sandbox")
+    c.add_argument("--width", type=int, default=1920)
+    c.add_argument("--height", type=int, default=1080)
+    c.add_argument("argv", nargs=argparse.REMAINDER, help="for run: -- command [args...]")
+    c.set_defaults(f=lambda a: {"start": cmd_sandbox_start, "stop": cmd_sandbox_stop, "status": cmd_sandbox_status,
+                                "env": cmd_sandbox_env, "run": cmd_sandbox_run}[a.action](a))
 
     s.add_parser("status", help="desktops, outputs, agent desktop, per-output support").set_defaults(f=cmd_status)
 
@@ -949,12 +1128,22 @@ def main():
     a11y("a11y-read", cmd_a11y_read, "read one element (text, state, actions)")
 
     a = p.parse_args()
+    if a.cmd == "sandbox" and a.action == "run":
+        if a.argv and a.argv[0] == "--":
+            a.argv = a.argv[1:]
+        if not a.argv:
+            p.error("sandbox run needs a command after --")
     if a.cmd == "launch":
         if a.argv and a.argv[0] == "--":
             a.argv = a.argv[1:]
         if not a.argv:
             p.error("launch needs a command after --")
     try:
+        if a.sandbox:
+            if a.cmd in ("sandbox", "create", "rename", "remove", "show", "switch", "bind-output",
+                         "browser-window", "claude-md", "setup-capture", "remove-capture"):
+                raise KagentError(f"`{a.cmd}` acts on the real desktop and cannot run with --sandbox")
+            enter_sandbox(a.sandbox_name)
         a.f(a)
     except KagentError as e:
         out({"error": str(e)})

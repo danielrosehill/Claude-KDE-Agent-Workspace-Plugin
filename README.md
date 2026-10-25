@@ -18,11 +18,13 @@ the human from the agent.
 | `create-agent-workspace` | Create (or adopt) a desktop called **Claude** or **AI Agents**, your choice; rename or remove it |
 | `test-app-in-agent-workspace` | Launch a GUI or terminal app on the agent desktop, drive it through AT-SPI, screenshot it, read its logs, troubleshoot |
 | `bind-agent-workspace-to-output` | Put the agent desktop on its own monitor: real per-output desktops on Plasma ≥ 6.7, a dedicated-output fallback before that |
+| `use-sandbox` | Test in a **headless sandbox KWin** (private D-Bus and runtime dir): nothing appears on your screen or takes your focus. `--sandbox` before any subcommand runs it there |
 | `use-chrome` | Run Claude in Chrome in a Chrome window on the agent desktop instead of the user's, and write the CLAUDE.md directive that makes this the default |
 
 All of them call one script, `scripts/kagent.py`, which prints JSON:
 
 ```
+sandbox start|stop|status|env|run   (--sandbox <subcommand> runs that subcommand inside it)
 status | create | rename | remove | show | switch | windows | launch | move
 activate | close | browser-window | chrome-profiles | claude-md
 outputs | bind-output | setup-capture | remove-capture | capture
@@ -79,6 +81,8 @@ block in place, and `--remove` takes it out.
   for KWin's screenshot interface. `remove-capture` deletes both.
 - Only with `bind-output --enable-per-output`: `kwinrc [Windows] PerOutputVirtualDesktops=true`.
 - App logs go to `~/.cache/kde-agent-workspace/logs/`.
+- Only with `sandbox start`: a private runtime dir `$XDG_RUNTIME_DIR/kagent-sandbox-<name>/`
+  and state + KWin log in `~/.cache/kde-agent-workspace/`. `sandbox stop` removes the runtime dir.
 - Only with `claude-md`: one marked block in the CLAUDE.md you name.
 
 ## Related
@@ -88,6 +92,9 @@ general Plasma runtime operations: panels, widgets, themes, shortcuts, KWallet. 
 plugin covers only the agent workspace.
 
 ## Status
+
+The sandbox (`use-sandbox`) was verified live on 2026-10-25: start, launch Konsole, AT-SPI
+bus isolation, screen capture and stop.
 
 Desktop listing, creation, launch, AT-SPI driving, capture (stale and peeked) and
 moving windows to an output were verified live on 2026-10-19, as was the Claude in
