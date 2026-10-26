@@ -19,14 +19,13 @@ the human from the agent.
 | `test-app-in-agent-workspace` | Launch a GUI or terminal app on the agent desktop, drive it through AT-SPI, screenshot it, read its logs, troubleshoot |
 | `bind-agent-workspace-to-output` | Put the agent desktop on its own monitor: real per-output desktops on Plasma ≥ 6.7, a dedicated-output fallback before that |
 | `use-sandbox` | Test in a **headless sandbox KWin** (private D-Bus and runtime dir): nothing appears on your screen or takes your focus. `--sandbox` before any subcommand runs it there |
-| `use-chrome` | Run Claude in Chrome in a Chrome window on the agent desktop instead of the user's, and write the CLAUDE.md directive that makes this the default |
 
 All of them call one script, `scripts/kagent.py`, which prints JSON:
 
 ```
 sandbox start|stop|status|env|run   (--sandbox <subcommand> runs that subcommand inside it)
 status | create | rename | remove | show | switch | windows | launch | move
-activate | close | browser-window | chrome-profiles | claude-md
+activate | close | browser-window
 outputs | bind-output | setup-capture | remove-capture | capture
 a11y-tree | a11y-click | a11y-set-text | a11y-read
 ```
@@ -51,26 +50,18 @@ error strings and dates: [`reference/findings.md`](reference/findings.md).
 - `qdbus6`, `kreadconfig6`/`kwriteconfig6`, `kbuildsycoca6`, `journalctl --user` readable
 - Plasma ≥ 6.7 for true per-monitor agent desktops
 
-## Claude in Chrome
+## Browsers (Claude in Chrome retired)
 
-The Claude in Chrome extension puts its tab group into whichever Chrome window had
-focus last, which is normally the user's. `use-chrome` opens a fresh Chrome window on
-the agent desktop, creates the group while that window still has focus, then returns
-focus to the user. All browser work then happens off-screen. Screenshots stay current
-there because the extension renders through CDP.
+`use-chrome`, `chrome-profiles` and `claude-md` were removed in v0.5.0 (2026-10-26).
+They ran Claude in Chrome in a window on the agent desktop. In practice that still
+flashed windows across the user's screen and took focus, and it tied agent browsing to
+whichever Chrome profile held the extension. A dedicated browser that the agent
+reaches over CDP and the user watches remotely works better for agent browsing.
 
-Chrome profiles: `kagent.py chrome-profiles` lists them, with each one's account and
-whether Claude in Chrome is installed in it. `browser-window --profile <name|email|dir>`
-opens the agent window in that profile, so work on an account uses the profile that is
-already signed into it. The extension is per profile. Every profile that has it connects
-as a separate browser (its own `deviceId`), and the matching one must be selected with
-`select_browser` before the tab group is created.
-
-`kagent.py claude-md` writes a directive into a CLAUDE.md (default: user-level
-`~/.claude/CLAUDE.md`) telling every session to work this way and to treat the user's
-current desktop as private. The block sits between
-`<!-- kde-agent-workspace:chrome:begin/end -->` markers. Re-running it updates the
-block in place, and `--remove` takes it out.
+`browser-window` remains for testing web apps on the agent desktop. Browsers are
+single-instance, so a plain `launch` can drag the user's window along. `browser-window`
+matches the new window by class and moves only that one. `--profile <name|email|dir>`
+picks a Chrome profile.
 
 ## What it changes on your system
 
@@ -83,7 +74,6 @@ block in place, and `--remove` takes it out.
 - App logs go to `~/.cache/kde-agent-workspace/logs/`.
 - Only with `sandbox start`: a private runtime dir `$XDG_RUNTIME_DIR/kagent-sandbox-<name>/`
   and state + KWin log in `~/.cache/kde-agent-workspace/`. `sandbox stop` removes the runtime dir.
-- Only with `claude-md`: one marked block in the CLAUDE.md you name.
 
 ## Related
 
@@ -97,8 +87,7 @@ The sandbox (`use-sandbox`) was verified live on 2026-10-25: start, launch Konso
 bus isolation, screen capture and stop.
 
 Desktop listing, creation, launch, AT-SPI driving, capture (stale and peeked) and
-moving windows to an output were verified live on 2026-10-19, as was the Claude in
-Chrome flow (Chrome 155). The Plasma ≥ 6.7
+moving windows to an output were verified live on 2026-10-19. The Plasma ≥ 6.7
 per-output binding is built from KWin source and has not yet been run. See the skill for
 what to report if it fails.
 

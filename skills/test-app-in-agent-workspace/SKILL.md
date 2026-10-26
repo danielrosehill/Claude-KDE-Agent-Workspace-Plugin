@@ -62,7 +62,7 @@ If `windows` is empty, read the `note`:
   gets taken too. Dialogs transient for an already-open window are always skipped.
   Moving one drags its parent along, and on 2026-10-19 that took the user's Chrome
   window together with its Open File portal.
-- Browsers: use `browser-window` (see `use-chrome`), which matches on window class.
+- Browsers: use `browser-window`, which matches on window class.
 - Slow start → `--timeout 40`.
 - `exited` non-null → it crashed or is CLI-only; read `log`.
 

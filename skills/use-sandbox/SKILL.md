@@ -44,7 +44,7 @@ Probe D-Bus services the same way. `qdbus6` outside `sandbox run` talks to the u
 
 - **Stop it when done** (`sandbox stop`). It holds a KWin, a dbus-daemon and whatever ran inside.
 - Commands that act on the real desktop refuse `--sandbox`: `create`, `rename`, `remove`,
-  `show`, `switch`, `bind-output`, `browser-window`, `claude-md`, `setup-capture`.
+  `show`, `switch`, `bind-output`, `browser-window`, `setup-capture`.
 - There's no Xwayland: X11-only apps fail to start rather than appear on the real screen.
 - `capture` needs the one-time `setup-capture` helper (run without `--sandbox`).
 - Programs in the sandbox still share the user's home directory, files and network.

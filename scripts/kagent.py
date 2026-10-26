@@ -598,72 +598,14 @@ return info;
 """))
 
 
-MD_BEGIN = "<!-- kde-agent-workspace:chrome:begin -->"
-MD_END = "<!-- kde-agent-workspace:chrome:end -->"
-
-
-def chrome_directive(desktop_name):
-    script = Path(__file__).resolve()
-    return f"""{MD_BEGIN}
-## Claude in Chrome: use the agent workspace
-
-Drive Chrome (`mcp__claude-in-chrome__*`) only in a window on the KDE desktop
-**{desktop_name}**. The user's current desktop is private: never open, move, focus or
-screenshot windows there. Before the first browser call of a task, run skill
-`use-chrome` (`skill:kde-agent-workspace/use-chrome`, script `{script}`). Use the
-profile matching the task's account (`kagent.py chrome-profiles`; `browser-window
---profile <name|email>`), which is already signed in. If a profile lacks the
-extension, ask the user to install it. Managed by `kagent.py claude-md`.
-{MD_END}
-"""
-
-
-def cmd_claude_md(a):
-    """Write (or remove) the Claude-in-Chrome directive in a CLAUDE.md, idempotently."""
-    target = Path(a.file).expanduser()
-    text = target.read_text() if target.exists() else ""
-    if MD_BEGIN in text and MD_END in text:
-        head, _, rest = text.partition(MD_BEGIN)
-        _, _, tail = rest.partition(MD_END)
-        text = head + "\0" + tail
-    elif not a.remove:
-        # Never append inside or after another tool's generated block (e.g. a
-        # `<!-- habits-of-claude:begin -->` section rebuilt from source): go above it.
-        lines = text.splitlines(keepends=True)
-        at = next((i for i, l in enumerate(lines) if l.startswith("<!--") and l.rstrip().endswith(":begin -->")), None)
-        if at is None:
-            text = text.rstrip("\n") + ("\n\n" if text.strip() else "") + "\0\n"
-        else:
-            text = "".join(lines[:at]) + "\0\n\n" + "".join(lines[at:])
-    if a.remove:
-        new = text.replace("\0\n\n", "").replace("\0\n", "").replace("\0", "")
-    else:
-        name = (load_config().get("desktop_name") or DEFAULT_NAMES[0])
-        new = text.replace("\0", chrome_directive(name).rstrip("\n"))
-    changed = new != (target.read_text() if target.exists() else "")
-    if changed and not a.dry_run:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(new)
-    out({"file": str(target), "changed": changed, "dry_run": a.dry_run, "removed": a.remove,
-         "block": None if a.remove else chrome_directive(load_config().get("desktop_name") or DEFAULT_NAMES[0])})
-
-
-CLAUDE_EXTENSION_ID = "fcoeoabgfenejglbffodgkkbkcdhcgfn"   # Claude in Chrome (Web Store id)
-
-
 def chrome_profiles(user_data_dir):
-    """Profiles from Chrome's `Local State`, with whether Claude in Chrome is installed in each.
-
-    The extension is per profile: each profile that has it connects as a separate browser
-    (its own deviceId in list_connected_browsers), and a profile without it cannot be driven.
-    """
+    """Profiles from Chrome's `Local State`."""
     root = Path(user_data_dir).expanduser()
     state = json.loads((root / "Local State").read_text())["profile"]
     return [{
         "dir": d,
         "name": v.get("name"),
         "email": v.get("user_name") or None,
-        "claude_extension": (root / d / "Extensions" / CLAUDE_EXTENSION_ID).is_dir(),
         "last_used": d == state.get("last_used"),
     } for d, v in state.get("info_cache", {}).items()]
 
@@ -679,28 +621,20 @@ def resolve_chrome_profile(user_data_dir, wanted):
     return hits[0]
 
 
-def cmd_chrome_profiles(a):
-    out({"user_data_dir": a.user_data_dir, "profiles": chrome_profiles(a.user_data_dir)})
-
-
 def cmd_browser_window(a):
-    """Open a fresh browser window on the agent desktop for Claude in Chrome.
+    """Open a fresh browser window on the agent desktop.
 
-    The extension does not open a window of its own for a new tab group: it appends the
-    group to whichever Chrome window was focused last. A freshly opened window is focused,
-    so it keeps focus here (`previous_active` is returned) until the caller has created
-    the tab group and calls `activate <previous_active>`.
+    Browsers are single-instance: a plain `launch` hands the window to the running
+    process, which can drag the user's window along. This matches the new window by
+    class and moves only it. The new window takes focus; `previous_active` is returned
+    so the caller can `activate` it back.
 
-    Without --profile Chrome opens the window in its last-used profile. With it, the
-    window opens in that profile, which must have Claude in Chrome installed.
+    Without --profile Chrome opens the window in its last-used profile.
     """
     argv = [a.browser, "--new-window", "about:blank"]
     profile = None
     if a.profile:
         profile = resolve_chrome_profile(a.user_data_dir, a.profile)
-        if not profile["claude_extension"]:
-            raise KagentError(f"Chrome profile {profile['dir']} ({profile['name']}) has no Claude in Chrome "
-                              "extension; the user must install it and connect it in that profile first")
         argv.insert(1, f"--profile-directory={profile['dir']}")
     d = agent_desktop()
     previous = active_window()
@@ -718,7 +652,7 @@ def cmd_browser_window(a):
         "profile": profile,
         "previous_active": previous,
         "agent_desktop": d,
-        "next": "tabs_context_mcp {createIfEmpty: true} NOW, then: kagent.py activate <previous_active>",
+        "next": "kagent.py activate <previous_active>",
     })
 
 
@@ -1050,28 +984,19 @@ def main():
     c.add_argument("handle")
     c.set_defaults(f=cmd_activate)
 
-    c = s.add_parser("browser-window", help="open a fresh browser window on the agent desktop for Claude in Chrome")
+    c = s.add_parser("browser-window", help="open a fresh browser window on the agent desktop")
     c.add_argument("--browser", default="google-chrome")
     c.add_argument("--wm-class", help="KWin resourceClass of the browser; default: basename of --browser")
     c.add_argument("--output", help="also send the window to this output")
     c.add_argument("--timeout", type=float, default=10)
-    c.add_argument("--profile", help="Chrome profile: directory, display name or account email (see chrome-profiles)")
+    c.add_argument("--profile", help="Chrome profile: directory, display name or account email")
     c.add_argument("--user-data-dir", default="~/.config/google-chrome")
     c.set_defaults(f=cmd_browser_window)
-
-    c = s.add_parser("chrome-profiles", help="list Chrome profiles and whether Claude in Chrome is installed in each")
-    c.add_argument("--user-data-dir", default="~/.config/google-chrome")
-    c.set_defaults(f=cmd_chrome_profiles)
 
     c = s.add_parser("close", help="close a window by handle")
     c.add_argument("handle")
     c.set_defaults(f=cmd_close)
 
-    c = s.add_parser("claude-md", help="write the Claude-in-Chrome agent-workspace directive into a CLAUDE.md")
-    c.add_argument("--file", default="~/.claude/CLAUDE.md", help="default: user-level ~/.claude/CLAUDE.md")
-    c.add_argument("--remove", action="store_true")
-    c.add_argument("--dry-run", action="store_true")
-    c.set_defaults(f=cmd_claude_md)
 
     c = s.add_parser("move", help="move a window by handle")
     c.add_argument("handle")
@@ -1141,7 +1066,7 @@ def main():
     try:
         if a.sandbox:
             if a.cmd in ("sandbox", "create", "rename", "remove", "show", "switch", "bind-output",
-                         "browser-window", "claude-md", "setup-capture", "remove-capture"):
+                         "browser-window", "setup-capture", "remove-capture"):
                 raise KagentError(f"`{a.cmd}` acts on the real desktop and cannot run with --sandbox")
             enter_sandbox(a.sandbox_name)
         a.f(a)
