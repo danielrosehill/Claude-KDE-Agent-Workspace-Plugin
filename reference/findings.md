@@ -153,3 +153,16 @@ exist as methods. Use `org.freedesktop.DBus.Properties.Get/Set`.
 - `sandbox stop` finds the sandbox's processes by `XDG_RUNTIME_DIR=<private dir>` in
   `/proc/<pid>/environ`. That catches apps started by tools run via `sandbox run`, not
   only by `launch`.
+
+## Sandbox Konsole spawns crashing portal processes on the host (verified 2026-10-27)
+
+Starting Konsole through `kagent.py sandbox run` (Konsole 25.12.3, Qt 6.10.2) produced
+31 SIGABRT core dumps in about 30 s (13:22:18-13:22:49): 29 from `xdg-desktop-portal-kde`,
+and 2 from `ksecretd`. All of them abort in `QGuiApplicationPrivate::createEventDispatcher`
+via `QMessageLogger::fatal`. Their cgroup was the calling session's Konsole tab scope, not
+the sandbox. So they were spawned by the sandboxed run but from the host session's process
+tree, and they failed to start a GUI. The host user sees them as a burst of crash
+notifications. The host's own portal stayed up and nothing was left failed. The fatal
+message itself was not in the journal (not captured).
+Until this is fixed in `sandbox run`, warn the user before running a Konsole-based test in
+the sandbox, or run it at a moment they agree to.
